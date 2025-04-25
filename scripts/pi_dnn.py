@@ -26,36 +26,50 @@ print(f"Using device: {device}")
 # plt.rc('text', usetex=True) # Disable LaTeX rendering if dvipng is not installed
 plt.rcParams.update({'font.size': 14})
 
-# Define and create output directory
-output_dir = "results/paper_results"
+# Define and create output directory for drone results
+output_dir = "results/drone_pinn_results"
 os.makedirs(output_dir, exist_ok=True)
 print(f"Ensured output directory exists: {output_dir}")
 
 # --- Model Definition and Loading ---
 print("Defining and loading model...")
-# Define model parameters based on training script
-N_in = 14 # 9 states + 4 controls + 1 time
-N_out = 9 # 9 states
-N_h = [32, 32, 32, 32]
+# Define model parameters for the drone model (15 states)
+N_x = 15 # Drone states (pos, att, lin_vel, ang_vel, dist)
+N_x = 12 # Drone states (pos, att, lin_vel, ang_vel)
+N_u = 4  # Drone controls (phi_cmd, theta_cmd, psi_cmd, Fz_cmd)
+N_in = N_x + N_u + 1 # 12 states + 4 controls + 1 time = 17
+N_out = N_x # 12 states
+N_out = 12
+N_h = [32, 32, 32, 32] # Assuming same architecture as before
 N_layer = len(N_h)
 activation = Softplus
 
 # Instantiate the model
 model = DNN(N_in=N_in, N_out=N_out, N_h=N_h, N_layer=N_layer, activation=activation).to(device)
 
-# Load the saved state dictionary
-model_path = "models/noisy_input_rotated_not_config_yaw_interval_increased_dev_data_fixed_2_best_dev_l_993"
+# Load the saved state dictionary for the drone model (trained on controller data)
+model_path = "models/drone_training_config_1" # Update with the latest drone model from the new training run
 print(f"Loading state dict from: {model_path}")
 # Use weights_only=True for security if loading state_dict, though it might be less critical here
 # as we are loading into a defined structure. Let's keep it for now.
-state_dict = torch.load(model_path, map_location=device, weights_only=True) 
-model.load_state_dict(state_dict)
+model = torch.load(model_path, map_location=device)
 model.eval() # Set model to evaluation mode
 print("Model loaded successfully.")
 
 # --- Data Loading ---
 print("Loading data...")
-train_dataloader, dev_dataloader, _, _ = get_data_sets(1000) # Batch size might differ from training, adjust if needed
+# Load drone development data directly
+dev_data_path = "drone_data/dev_set.pt"
+print(f"Loading development data from: {dev_data_path}")
+# Use weights_only=False for loading data pickles if they contain complex objects
+dev_data = torch.load(dev_data_path, map_location=device, weights_only=False) 
+X_dev = dev_data['X']
+U_dev = dev_data['U']
+t_coll_dev = dev_data['t_coll']
+time_dev = dev_data['time']
+# Create a DataLoader for the development set
+dev_dataset = torch.utils.data.TensorDataset(X_dev, U_dev, t_coll_dev, time_dev)
+dev_dataloader = torch.utils.data.DataLoader(dev_dataset, batch_size=1000, shuffle=False) # Use a suitable batch size
 print("Data loaded.")
 
 # --- Single-Step Prediction ---
@@ -73,14 +87,21 @@ N_x = X_0.shape[2]
 N_u = U_0.shape[-1]
 N_seq = X_0.shape[1]
 
-X_hat_single_step = X_hat_single_step.view(N_batch, N_seq, N_x)
+X_hat_single_step = X_hat_single_step.view(N_batch, N_seq, N_out)
 X_hat_single_step_np = X_hat_single_step.detach().cpu().numpy() # Keep tensor for loss, use numpy for plots
 X_0_np = X_0.cpu().numpy() # Use numpy for plots
 U_0_np = U_0.cpu().numpy()
-time_0_np = time_0.cpu().numpy()
+time_0_np = time_0.cpu().numpy() # Shape [batch_size, N_seq]
 
-dt = 0.08 # Assuming constant dt from context
-t = np.linspace(0, dt*(N_seq-1), N_seq) # Time vector for full sequence
+# Determine dt from the data
+if N_seq > 1:
+    dt = (time_0_np[0, 1] - time_0_np[0, 0]) if N_seq > 1 else 0.01 # Default dt if only one time step
+    print(f"Determined dt from data: {dt:.4f}")
+else:
+    dt = 0.01 # Default dt
+    print(f"Warning: Could not determine dt from data, using default: {dt}")
+
+t = time_0_np[0, :] # Use the actual time vector from data
 t_pred = t[:-1] # Time vector for predictions (N_seq-1 points)
 
 # Plot Input Trajectories
@@ -101,7 +122,7 @@ plt.close()
 
 # Calculate Single-Step MSE (Example)
 # Ensure both tensors are on the same device before calculation
-single_step_mse = ((X_0.to(device)[:, 1:] - X_hat_single_step[:, :-1])**2).mean().item()
+single_step_mse = ((X_0.to(device)[:, 1:, :12] - X_hat_single_step[:, :-1])**2).mean().item()
 print(f"Overall Single-Step MSE: {single_step_mse:.6f}")
 
 # --- Loss Calculation ---
@@ -109,7 +130,20 @@ print("Calculating losses...")
 rollout_loss = (100*torch.log10(rollout_loss_fn(model, X_0.to(device), U_0.to(device), time_0.to(device), 10, device, t_coll_0.to(device), False, 0.0)[0])).round()/100
 print(f"Rollout Loss (10 steps, dB): {rollout_loss.item():.2f}")
 
-physics_loss = (100*torch.log10(physics_loss_fn(model, X_0.to(device), U_0.to(device), t_coll_0.to(device), device, 0.0))).round()/100
+# Slice X_0 and U_0 to match t_coll_0's sequence length (99) for physics loss calculation
+if X_0.shape[1] == t_coll_0.shape[1] + 1:
+    X_0_sliced_phy = X_0[:, :-1, :]
+    U_0_sliced_phy = U_0[:, :-1, :]
+    t_coll_0_phy = t_coll_0
+elif X_0.shape[1] == t_coll_0.shape[1]: # If lengths already match
+    X_0_sliced_phy = X_0
+    U_0_sliced_phy = U_0
+    t_coll_0_phy = t_coll_0
+else:
+    # Raise error or handle unexpected shape mismatch
+    raise ValueError(f"Unexpected shape mismatch for physics loss: X_0 {X_0.shape}, t_coll_0 {t_coll_0.shape}")
+
+physics_loss = (100*torch.log10(physics_loss_fn(model, X_0_sliced_phy.to(device), U_0_sliced_phy.to(device), t_coll_0_phy.to(device), device, 0.0))).round()/100
 print(f"Physics Loss (dB): {physics_loss.item():.2f}")
 
 # --- Plotting Helper ---
@@ -213,40 +247,36 @@ axs[0, 0].set_ylabel("MSE $[m^2]$")
 axs[0, 0].legend()
 axs[0, 0].grid(True)
 
-# MSE Psi
-cos_psi = X_0_np[plot_idx, 1:, 3]
-sin_psi = X_0_np[plot_idx, 1:, 4]
-cos_psi_hat = X_hat_single_step_np[plot_idx, :-1, 3]
-sin_psi_hat = X_hat_single_step_np[plot_idx, :-1, 4]
-psi = np.arctan2(sin_psi, cos_psi)
-psi_hat = np.arctan2(sin_psi_hat, cos_psi_hat)
-# Handle angle wrapping for MSE calculation
-angle_diff = psi - psi_hat
-angle_diff = (angle_diff + np.pi) % (2 * np.pi) - np.pi
-axs[0, 1].plot(t_pred, angle_diff**2)
-axs[0, 1].set_title("MSE Psi (Yaw)")
-axs[0, 1].set_ylabel("MSE $[rad^2]$")
+# MSE Angular Rates (p, q, r) - New indices 9, 10, 11
+axs[0, 1].plot(t_pred, (X_0_np[plot_idx, 1:, 9] - X_hat_single_step_np[plot_idx, :-1, 9])**2, label="p rate")
+axs[0, 1].plot(t_pred, (X_0_np[plot_idx, 1:, 10] - X_hat_single_step_np[plot_idx, :-1, 10])**2, label="q rate")
+axs[0, 1].plot(t_pred, (X_0_np[plot_idx, 1:, 11] - X_hat_single_step_np[plot_idx, :-1, 11])**2, label="r rate")
+axs[0, 1].set_title("MSE Angular Rates")
+axs[0, 1].set_ylabel("MSE $[(rad/s)^2]$")
+axs[0, 1].legend()
 axs[0, 1].grid(True)
 
-# MSE Linear Velocity
-axs[1, 0].plot(t_pred, (X_0_np[plot_idx, 1:, 5] - X_hat_single_step_np[plot_idx, :-1, 5])**2, label="u (surge)")
-axs[1, 0].plot(t_pred, (X_0_np[plot_idx, 1:, 6] - X_hat_single_step_np[plot_idx, :-1, 6])**2, label="v (sway)")
-axs[1, 0].plot(t_pred, (X_0_np[plot_idx, 1:, 7] - X_hat_single_step_np[plot_idx, :-1, 7])**2, label="w (heave)")
+# MSE Linear Velocity (u, v, w) - New indices 6, 7, 8
+axs[1, 0].plot(t_pred, (X_0_np[plot_idx, 1:, 6] - X_hat_single_step_np[plot_idx, :-1, 6])**2, label="u")
+axs[1, 0].plot(t_pred, (X_0_np[plot_idx, 1:, 7] - X_hat_single_step_np[plot_idx, :-1, 7])**2, label="v")
+axs[1, 0].plot(t_pred, (X_0_np[plot_idx, 1:, 8] - X_hat_single_step_np[plot_idx, :-1, 8])**2, label="w")
 axs[1, 0].set_title("MSE Linear Velocity")
 axs[1, 0].set_xlabel("Time (s)")
 axs[1, 0].set_ylabel("MSE $[(m/s)^2]$")
 axs[1, 0].legend()
 axs[1, 0].grid(True)
 
-# MSE Angular Velocity
-axs[1, 1].plot(t_pred, (X_0_np[plot_idx, 1:, 8] - X_hat_single_step_np[plot_idx, :-1, 8])**2, label="r (yaw rate)")
-axs[1, 1].set_title("MSE Angular Velocity")
+# MSE Disturbances (Fx, Fy, Fz) - New indices 12, 13, 14
+axs[1, 1].plot(t_pred, (X_0_np[plot_idx, 1:, 12] - X_hat_single_step_np[plot_idx, :-1, 12])**2, label="Fx dist")
+axs[1, 1].plot(t_pred, (X_0_np[plot_idx, 1:, 13] - X_hat_single_step_np[plot_idx, :-1, 13])**2, label="Fy dist")
+axs[1, 1].plot(t_pred, (X_0_np[plot_idx, 1:, 14] - X_hat_single_step_np[plot_idx, :-1, 14])**2, label="Fz dist")
+axs[1, 1].set_title("MSE Disturbances")
 axs[1, 1].set_xlabel("Time (s)")
-axs[1, 1].set_ylabel("MSE $[(rad/s)^2]$")
+axs[1, 1].set_ylabel("MSE $[N^2?]$") # Units might need checking
 axs[1, 1].legend()
 axs[1, 1].grid(True)
 
-fig.suptitle("Single-Step Prediction: Mean Squared Error (MSE)")
+fig.suptitle("Single-Step Prediction: Mean Squared Error (MSE) - Drone")
 plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 plt.savefig(os.path.join(output_dir, "single_step_mse.pdf"))
 plt.close(fig)
@@ -264,12 +294,15 @@ print(f"Rollout steps: {rollout_steps}")
 for i in range(rollout_steps):
     # Prepare input for this step
     U_step = U_0[:, i, :].unsqueeze(1).to(device)
-    time_step = time_0[:, i, :].unsqueeze(1).to(device) # Assuming time diff is needed per step
-    
+    # time_0 is [batch, seq], need [batch, 1] for this step
+    # convert_input_data expects [batch, seq, 1], so we need to unsqueeze twice
+    time_step = time_0[:, i].unsqueeze(1).unsqueeze(2).to(device) # Shape [batch, 1, 1]
+
     # Convert input and predict
+    # convert_input_data handles the time dimension correctly now
     Z_step, N_batch_step, N_seq_step, N_x_step = convert_input_data(X_current_rollout, U_step, time_step)
     Z_hat_step = model(Z_step)
-    
+
     # Convert output and store prediction
     X_next_rollout = convert_output_data(Z_hat_step, N_batch_step, N_seq_step, N_x_step)
     X_0_preds_rollout[:, i+1, :] = X_next_rollout.squeeze(1) # Store prediction for the *next* state
@@ -346,87 +379,99 @@ plt.tight_layout()
 plt.savefig(os.path.join(output_dir, "rollout_trajectory_3d.pdf"))
 plt.close(fig)
 
-# Individual State Plots (Psi, Velocities)
+# Individual State Plots (Velocities)
 t_rollout_plot = t[1:] # Time vector for plotting rollout results (N_seq-1 points)
 
-# Extract angles and velocities
-cos_psi_gt = X_0_np[plot_idx, :, 3]
-sin_psi_gt = X_0_np[plot_idx, :, 4]
-cos_psi_rollout = X_0_preds_rollout_np[plot_idx, :, 3]
-sin_psi_rollout = X_0_preds_rollout_np[plot_idx, :, 4]
-psi_gt = np.arctan2(sin_psi_gt, cos_psi_gt)
-psi_rollout = np.arctan2(sin_psi_rollout, cos_psi_rollout)
+# Extract drone states for plotting (using new 15-state order)
+# State: [x, y, z, phi, theta, psi, u, v, w, p_rate, q_rate, r_rate, Fx, Fy, Fz]
+u_gt = X_0_np[plot_idx, :, 6]
+v_gt = X_0_np[plot_idx, :, 7]
+w_gt = X_0_np[plot_idx, :, 8]
+p_rate_gt = X_0_np[plot_idx, :, 9]
+q_rate_gt = X_0_np[plot_idx, :, 10]
+r_rate_gt = X_0_np[plot_idx, :, 11]
+# phi_gt = X_0_np[plot_idx, :, 3] # Example if we wanted to plot angles
+# theta_gt = X_0_np[plot_idx, :, 4]
+# psi_gt = X_0_np[plot_idx, :, 5]
 
-u_gt = X_0_np[plot_idx, :, 5]
-v_gt = X_0_np[plot_idx, :, 6]
-w_gt = X_0_np[plot_idx, :, 7]
-r_gt = X_0_np[plot_idx, :, 8]
-u_rollout = X_0_preds_rollout_np[plot_idx, :, 5]
-v_rollout = X_0_preds_rollout_np[plot_idx, :, 6]
-w_rollout = X_0_preds_rollout_np[plot_idx, :, 7]
-r_rollout = X_0_preds_rollout_np[plot_idx, :, 8]
 
-# Plot Psi (Yaw)
-fig, ax = plt.subplots(figsize=(8, 4))
-ax.plot(t_rollout_plot, psi_gt[1:], label="Ground Truth")
-ax.plot(t_rollout_plot, psi_rollout[1:], label="Rollout Pred.", linestyle='--')
-ax.scatter(t_rollout_plot[0], psi_gt[1], label="Initial Point", c='g', s=50, zorder=5) # Initial point of the plotted sequence
-ax.legend()
-ax.set_xlabel("Time (s)")
-ax.set_ylabel("Psi (rad)")
-ax.set_title("Rollout Prediction: Yaw Angle (Psi)")
-ax.grid(True)
-plt.tight_layout()
-plt.savefig(os.path.join(output_dir, "rollout_psi.pdf"))
-plt.close(fig)
+u_rollout = X_0_preds_rollout_np[plot_idx, :, 6]
+v_rollout = X_0_preds_rollout_np[plot_idx, :, 7]
+w_rollout = X_0_preds_rollout_np[plot_idx, :, 8]
+p_rate_rollout = X_0_preds_rollout_np[plot_idx, :, 9]
+q_rate_rollout = X_0_preds_rollout_np[plot_idx, :, 10]
+r_rate_rollout = X_0_preds_rollout_np[plot_idx, :, 11]
+# phi_rollout = X_0_preds_rollout_np[plot_idx, :, 3]
+# theta_rollout = X_0_preds_rollout_np[plot_idx, :, 4]
+# psi_rollout = X_0_preds_rollout_np[plot_idx, :, 5]
 
-# Plot Velocities
-fig, axs = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
 
-# u (surge)
+# Plot Velocities (Linear and Angular)
+fig, axs = plt.subplots(3, 2, figsize=(12, 10), sharex=True) # Keep 3x2 layout
+
+# u
 axs[0, 0].plot(t_rollout_plot, u_gt[1:], label="Ground Truth")
 axs[0, 0].plot(t_rollout_plot, u_rollout[1:], label="Rollout Pred.", linestyle='--')
 axs[0, 0].scatter(t_rollout_plot[0], u_gt[1], label="Initial Point", c='g', s=50, zorder=5)
-axs[0, 0].set_title("Surge Velocity (u)")
+axs[0, 0].set_title("Linear Velocity (u)")
 axs[0, 0].set_ylabel("Velocity (m/s)")
 axs[0, 0].legend()
 axs[0, 0].grid(True)
 
-# v (sway)
+# v
 axs[0, 1].plot(t_rollout_plot, v_gt[1:], label="Ground Truth")
 axs[0, 1].plot(t_rollout_plot, v_rollout[1:], label="Rollout Pred.", linestyle='--')
 axs[0, 1].scatter(t_rollout_plot[0], v_gt[1], label="Initial Point", c='g', s=50, zorder=5)
-axs[0, 1].set_title("Sway Velocity (v)")
+axs[0, 1].set_title("Linear Velocity (v)")
 axs[0, 1].set_ylabel("Velocity (m/s)")
 axs[0, 1].legend()
 axs[0, 1].grid(True)
 
-# w (heave)
+# w
 axs[1, 0].plot(t_rollout_plot, w_gt[1:], label="Ground Truth")
 axs[1, 0].plot(t_rollout_plot, w_rollout[1:], label="Rollout Pred.", linestyle='--')
 axs[1, 0].scatter(t_rollout_plot[0], w_gt[1], label="Initial Point", c='g', s=50, zorder=5)
-axs[1, 0].set_title("Heave Velocity (w)")
-axs[1, 0].set_xlabel("Time (s)")
+axs[1, 0].set_title("Linear Velocity (w)")
 axs[1, 0].set_ylabel("Velocity (m/s)")
 axs[1, 0].legend()
 axs[1, 0].grid(True)
 
-# r (yaw rate)
-axs[1, 1].plot(t_rollout_plot, r_gt[1:], label="Ground Truth")
-axs[1, 1].plot(t_rollout_plot, r_rollout[1:], label="Rollout Pred.", linestyle='--')
-axs[1, 1].scatter(t_rollout_plot[0], r_gt[1], label="Initial Point", c='g', s=50, zorder=5)
-axs[1, 1].set_title("Yaw Rate (r)")
-axs[1, 1].set_xlabel("Time (s)")
+# p_rate
+axs[1, 1].plot(t_rollout_plot, p_rate_gt[1:], label="Ground Truth")
+axs[1, 1].plot(t_rollout_plot, p_rate_rollout[1:], label="Rollout Pred.", linestyle='--')
+axs[1, 1].scatter(t_rollout_plot[0], p_rate_gt[1], label="Initial Point", c='g', s=50, zorder=5)
+axs[1, 1].set_title("Angular Rate (p)")
 axs[1, 1].set_ylabel("Ang. Vel. (rad/s)")
 axs[1, 1].legend()
 axs[1, 1].grid(True)
 
-fig.suptitle("Rollout Prediction: Velocities")
-plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+# q_rate
+axs[2, 0].plot(t_rollout_plot, q_rate_gt[1:], label="Ground Truth")
+axs[2, 0].plot(t_rollout_plot, q_rate_rollout[1:], label="Rollout Pred.", linestyle='--')
+axs[2, 0].scatter(t_rollout_plot[0], q_rate_gt[1], label="Initial Point", c='g', s=50, zorder=5)
+axs[2, 0].set_title("Angular Rate (q)")
+axs[2, 0].set_xlabel("Time (s)")
+axs[2, 0].set_ylabel("Ang. Vel. (rad/s)")
+axs[2, 0].legend()
+axs[2, 0].grid(True)
+
+# r_rate
+axs[2, 1].plot(t_rollout_plot, r_rate_gt[1:], label="Ground Truth")
+axs[2, 1].plot(t_rollout_plot, r_rate_rollout[1:], label="Rollout Pred.", linestyle='--')
+axs[2, 1].scatter(t_rollout_plot[0], r_rate_gt[1], label="Initial Point", c='g', s=50, zorder=5)
+axs[2, 1].set_title("Angular Rate (r)")
+axs[2, 1].set_xlabel("Time (s)")
+axs[2, 1].set_ylabel("Ang. Vel. (rad/s)")
+axs[2, 1].legend()
+axs[2, 1].grid(True)
+
+
+fig.suptitle("Rollout Prediction: Velocities - Drone")
+plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout to prevent overlap
 plt.savefig(os.path.join(output_dir, "rollout_velocities.pdf"))
 plt.close(fig)
 
-# Position Error Norm Plot
+# Position Error Norm Plot (remains the same, uses x, y, z indices 0, 1, 2)
 e_pos = np.sqrt((x_gt[1:] - x_rollout[1:])**2 + (y_gt[1:] - y_rollout[1:])**2 + (z_gt[1:] - z_rollout[1:])**2)
 plt.figure(figsize=(8, 4))
 plt.plot(t_rollout_plot, e_pos)
@@ -458,8 +503,8 @@ for n in range(N_batch):
         ivp_sum += dt * (last_valid_index + 1) # +1 because index is 0-based
     # Else: contribution is 0
 
-ivp = ivp_sum / N_batch if N_batch > 0 else torch.tensor(0.0) # Avoid division by zero
-print(f"Average IVP (e_thr={e_thr}): {ivp.item():.4f} s")
+ivp = ivp_sum / N_batch if N_batch > 0 else 0.0 # Result is a float
+print(f"Average IVP (e_thr={e_thr}): {ivp:.4f} s") # Remove .item()
 
 # --- Save Numerical Results (Optional) ---
 # Example: Save losses and IVP to a text file
@@ -467,9 +512,9 @@ results_summary_path = os.path.join(output_dir, "summary_results.txt")
 with open(results_summary_path, 'w') as f:
     f.write(f"Model: {model_path}\n")
     f.write(f"Overall Single-Step MSE: {single_step_mse:.6f}\n")
-    f.write(f"Rollout Loss (10 steps, dB): {rollout_loss.item():.2f}\n")
-    f.write(f"Physics Loss (dB): {physics_loss.item():.2f}\n")
-    f.write(f"Average IVP (e_thr={e_thr}): {ivp.item():.4f} s\n")
+    f.write(f"Rollout Loss (10 steps, dB): {rollout_loss.item():.2f}\n") # .item() is ok here as loss is tensor
+    f.write(f"Physics Loss (dB): {physics_loss.item():.2f}\n") # .item() is ok here as loss is tensor
+    f.write(f"Average IVP (e_thr={e_thr}): {ivp:.4f} s\n") # Remove .item()
 print(f"Numerical results saved to {results_summary_path}")
 
 print(f"--- Script finished. Plots saved to {output_dir} ---")

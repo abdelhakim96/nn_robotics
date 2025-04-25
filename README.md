@@ -1,13 +1,13 @@
-# Physics-Informed Neural Control (PINC) for Learning BlueROV Dynamics
+# Physics-Informed Neural Control (PINC) for Learning Drone Dynamics
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://img.shields.io/badge/License-GPLv3-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.8+-blue?logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-1.12+-ee4c2c?logo=PyTorch&logoColor=white)
 ![Tests Passed](https://img.shields.io/badge/tests-passed-brightgreen)
 
 
 
-This repository implements a Physics-Informed Neural network with Control (PINC) approach to model and simulate the dynamics of a BlueROV2 underwater vehicle using PyTorch. It leverages the power of neural networks while incorporating physical principles to achieve data effecient neural dynamic models.
+This repository implements a Physics-Informed Neural Network with Control (PINC) approach to model and simulate the dynamics of a drone using PyTorch. It leverages the power of neural networks while incorporating physical principles to achieve data-efficient neural dynamic models.
 
 
 > **📄 Accepted Paper @ [IJCNN 2025](https://2025.ijcnn.org/)**  
@@ -16,9 +16,9 @@ This repository implements a Physics-Informed Neural network with Control (PINC)
 
 ## Key Features
 
-*   **BlueROV Dynamic Simulation**: Core simulation logic for the BlueROV2 vehicle implemented in `src/bluerov.py` and `src/bluerov_torch.py`.
-*   **Synthetic Data Generation**: Scripts (`data/create_data_2.py`) to generate customizable trajectory datasets for training and evaluation.
-*   **PINC Model Implementation**: Neural network models designed to learn system dynamics, potentially incorporating physical laws directly into the loss function (PINN) or network structure. See [Model Explanation](model_explanation.md) for details on the architecture and loss functions.
+*   **Drone Dynamic Simulation**: Core simulation logic for the drone implemented in `src/drone_model.py` and `src/drone_models/`.
+*   **Synthetic Data Generation**: Scripts (`data/create_drone_data.py`) generate customizable trajectory datasets for training and evaluation.
+*   **PINC Model Implementation**: Neural network models designed to learn system dynamics, incorporating physical laws directly into the loss function (PINN) or network structure. See [Model Explanation](model_explanation.md) for details on the architecture and loss functions.
 *   **Model Training Pipeline**: Robust training script (`training/train_model.py`) using PyTorch, with support for hyperparameter tuning.
 
 
@@ -28,7 +28,7 @@ This repository implements a Physics-Informed Neural network with Control (PINC)
 .
 ├── data/             # Scripts for data generation and utility functions
 ├── memory-bank/      # Project documentation (context, progress, etc.)
-├── models/           # Saved model checkpoints and utility functions. Contains trained neural network models. These models are the result of training the PINC architecture on the BlueROV dynamics.
+├── models/           # Saved model checkpoints and utility functions. Contains trained neural network models.
 ├── notebooks/        # Jupyter notebooks for experimentation (potentially outdated)
 ├── results/          # Saved evaluation results, plots, summaries
 ├── runs/             # TensorBoard log files
@@ -79,27 +79,29 @@ This repository implements a Physics-Informed Neural network with Control (PINC)
     *   `matplotlib`: Plotting and visualization
     *   `tqdm`: Progress bars
     *   `control`: Control system analysis library
-    *   `conflictfree`: ConFig method
 
-## Usage
+## Usage (BlueROV Model)
 
-### 1. Generate Data
+*Note: The following instructions apply to the original BlueROV model.*
 
-Run the data generation script. You might need to adjust parameters within the script.
+### 1. Generate BlueROV Data
+
+Run the BlueROV data generation script. You might need to adjust parameters within the script.
 
 ```bash
 python data/create_data_2.py
 ```
 
-### 2. Train the Model
+### 2. Train the BlueROV Model
 
-Execute the training script. Hyperparameters can often be adjusted within the script or via command-line arguments (if implemented).
+Execute the training script, specifying the BlueROV model and data if necessary (though defaults might work).
 
 ```bash
-python training/train_model.py
+# Example (check script defaults or modify as needed)
+python training/train_model.py --model_name bluerov --data_dir training_set
 ```
 
-### 3. Monitor Training with TensorBoard (Optional)
+### 3. Monitor BlueROV Training with TensorBoard (Optional)
 
 TensorBoard provides powerful visualizations to monitor the training process in real-time or analyze it afterward. This helps in understanding model convergence, comparing different runs, and debugging potential issues.
 
@@ -133,12 +135,48 @@ Use the scripts provided to evaluate performance and visualize results:
     ```bash
     python scripts/pi_dnn.py # (May need adjustments to load specific models/data)
     ```
-*(Note: You might need to modify these scripts to point to the specific model checkpoints you want to analyze, typically found in `models/`)*
+*(Note: You might need to modify these scripts to point to the specific BlueROV model checkpoints you want to analyze, typically found in `models/`)*
 
-## References / Acknowledgements
+## Usage (Drone Model)
 
-*   **This Repository:** [https://github.com/eivacom/pinc-xyz-yaw](https://github.com/eivacom/pinc-xyz-yaw)
-*   **ConFIG (Conflict-Free Gradient Combination):** The gradient combination techniques explored in this project are inspired by or utilize concepts from the ConFIG library. [https://github.com/tum-pbs/ConFIG](https://github.com/tum-pbs/ConFIG)
+*Note: The following instructions apply to the drone model workflow.*
+
+### 1. Generate Drone Data
+
+Run the drone data generation script. This uses a PID controller to generate trajectories (circle, lemniscate, sinusoidal hover).
+
+```bash
+python data/create_drone_data.py
+```
+This will create `training_set.pt` and `dev_set.pt` in the `drone_data/` directory.
+
+### 2. Train the Drone Model
+
+Execute the training script, ensuring it uses the drone model configuration and the correct data directory.
+
+```bash
+# Uses defaults: --model_name drone --data_dir drone_data
+python training/train_model.py
+```
+Model checkpoints (including the best based on dev loss) will be saved in the `models/` directory (e.g., `drone_training_1_best_dev_l_XXX`).
+
+### 3. Monitor Drone Training with TensorBoard (Optional)
+
+Similar to the BlueROV model, use TensorBoard to monitor training progress:
+
+```bash
+tensorboard --logdir runs
+```
+Look for runs named like `drone_training_...`.
+
+### 4. Evaluate the Drone Model
+
+The `scripts/pi_dnn.py` script is currently configured to evaluate the drone model. It performs single-step and rollout predictions and generates plots.
+
+```bash
+python scripts/pi_dnn.py
+```
+*(Note: You might need to modify `scripts/pi_dnn.py` to load a specific trained drone model checkpoint if it doesn't automatically load the latest or best one. Results are saved in `results/drone_pinn_results/`)*
 
 ## License
 

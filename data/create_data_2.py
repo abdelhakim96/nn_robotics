@@ -18,17 +18,38 @@ rov_sys = ct.NonlinearIOSystem(
     bluerov, None, inputs=('X', 'Y', 'Z', 'M_z'),
     outputs=('x', 'y', 'z', 'psi', 'u', 'v', 'w', 'r'),
     states=('x', 'y', 'z', 'psi', 'u', 'v', 'w', 'r'),
-    name='bluerov_system' # Name is often required or good practice
+    name='bluerov_system'  # Name is often required or good practice
 )
 
-def create_data(
-    N_traj, input_type, params=None, T_tot=5.2, dt=0.08, N_x=9, N_u=4,
-    N_coll=0, fixed_coll_points=None, intervals=None
-):
+
+def bluerov_dynamics(x, u, t):
     """
-    Generates trajectories for the BlueROV simulation.
+    Simulates the BlueROV dynamics using the control system library.
 
     Args:
+        x (np.ndarray): The current state of the BlueROV.
+        u (np.ndarray): The control inputs to the BlueROV.
+        t (np.ndarray): The current time.
+
+    Returns:
+        np.ndarray: The next state of the BlueROV.
+    """
+    u = np.array(u).reshape(-1,1)
+    _, x_next = ct.input_output_response(
+        rov_sys, [t], u, x
+    )
+    return x_next.flatten()
+
+
+def generate_data(
+    dynamics_fn, N_traj, input_type, T_tot, dt, N_x, N_u,
+    N_coll=0, fixed_coll_points=None, intervals=None, params=None
+):
+    """
+    Generates trajectories for a given dynamics function.
+
+    Args:
+        dynamics_fn (function): The dynamics function to use.
         N_traj (int): Number of trajectories to generate.
         input_type (str): Type of input ('noise', 'sine', 'line', 'circle', 'figure8', etc.).
         params (dict, optional): Parameters for specific trajectories. Defaults to None.
@@ -83,10 +104,10 @@ def create_data(
         # We might need to refine this logic if those trajectories also need scaling.
 
         # Simulate the system
-        _, x = ct.input_output_response(
-            rov_sys, t, U[n, :].T, x_0
-        )
-        x = x.T  # Transpose to match dimensions
+        x = np.zeros((N, N_x))
+        x[0, :] = x_0
+        for i in range(N - 1):
+            x[i+1, :] = dynamics_fn(x[i, :], U[n, i, :], t[i])
 
         # Store states
         X[n, :, :3] = x[:, :3]  # x, y, z
@@ -108,30 +129,22 @@ def create_data(
 def main():
     dt = 0.08
     T_tot = 5.2  # Longer trajectories for longer predictions
-    N_x = 9
-    N_u = 4
     N_coll = 0
 
-    paths = ['training_set', 'dev_set', 'test_set_interp', 'test_set_extrap']
-    no_trajs = [400, 1000, 1000, 1000]  # Number of trajectories for each set
-    dts = [dt, dt, dt-0.02, dt+0.02]
-    T_tots = [T_tot, T_tot, 3.9, 6.5]
+    paths = ['training_set', 'dev_set', 'test_set_interp', 'test_set_extrap', 'drone_training_set']
+    no_trajs = [400, 1000, 1000, 1000, 400]  # Number of trajectories for each set
+    dts = [dt, dt, dt - 0.02, dt + 0.02, dt]
+    T_tots = [T_tot, T_tot, 3.9, 6.5, T_tot]
     # Define intervals for initial conditions
     intervals_dict = {
         'training_set': [1.0, 1.0, 1.0, np.pi, 1.0, 0.0, 0.1, 0.0],
         'dev_set': [0.0, 0.0, 0.0, np.pi, 0.0, 0.0, 0.0, 0.0],
         'test_set_interp': [0.0, 0.0, 0.0, np.pi, 0.0, 0.0, 0.0, 0.0],
-        'test_set_extrap': [0.0, 0.0, 0.0, np.pi, 0.0, 0.0, 0.0, 0.0]
+        'test_set_extrap': [0.0, 0.0, 0.0, np.pi, 0.0, 0.0, 0.0, 0.0],
+        'drone_training_set': [1.0, 1.0, 1.0, np.pi, 1.0, 0.0, 0.1, 0.0]
     }
-    # more complex intervals for initial condition
-    # intervals_dict = {
-    #     'training_set': [1.0, 1.0, 1.0, np.pi, 1.0, 1.0, 1.0, 0.5],
-    #     'dev_set': [1.0, 1.0, 1.0, np.pi, 1.0, 1.0, 1.0, 0.5],
-    #     'test_set_interp': [1.0, 1.0, 1.0, np.pi, 1.0, 1.0, 1.0, 0.5],
-    #     'test_set_extrap': [1.0, 1.0, 1.0, np.pi, 1.0, 1.0, 1.0, 0.5]
-    # }
-    
-    #Define input types for each dataset
+
+    # Define input types for each dataset
     input_type_dict = {
         'training_set': 'noise',
         'dev_set': 'sine',
@@ -140,27 +153,26 @@ def main():
         # Add new trajectory types
         'test_set_line': 'line',
         'test_set_circle': 'circle',
-        'test_set_figure8': 'figure8'
+        'test_set_figure8': 'figure8',
+        'drone_training_set': 'noise'
     }
 
     # Parameters for specific trajectories (using defaults from data_utility for now)
     trajectory_params = {
         'line': {'forward_thrust': 5.0},
-        'circle': {'forward_thrust': 5.0, 'yaw_moment': 0.5},
-        'figure8': {'forward_thrust': 5.0, 'yaw_amplitude': 1.0, 'yaw_frequency': 0.2} # Adjust freq based on T_tot if needed
+        'circle': {'yaw_moment': 0.5},
+        'figure8': {'forward_thrust': 5.0, 'yaw_amplitude': 1.0, 'yaw_frequency': 0.2}  # Adjust freq based on T_tot if needed
     }
 
-    # Add new paths and parameters for specific trajectories
-    paths.extend(['test_set_line', 'test_set_circle', 'test_set_figure8'])
-    no_trajs.extend([10, 10, 10]) # Generate fewer trajectories for these specific tests
-    dts.extend([dt, dt, dt]) # Use default dt
-    T_tots.extend([T_tot, T_tot, T_tot]) # Use default T_tot
+    # Define drone dynamics function
+    def drone_dynamics_wrapper(x, u, dt):
+        from data.create_drone_data import drone_dynamics
+        return drone_dynamics(x, u, dt)
 
-    # Use zero intervals for deterministic starting points for new trajectories
-    intervals_dict['test_set_line'] = [0.0] * 8
-    intervals_dict['test_set_circle'] = [0.0] * 8
-    intervals_dict['test_set_figure8'] = [0.0] * 8
-
+    dynamics_dict = {
+        'bluerov': bluerov_dynamics,
+        'drone': drone_dynamics_wrapper
+    }
 
     for path, n_traj, dt_, T_tot_ in zip(paths, no_trajs, dts, T_tots):
         print(f"\n--- Generating dataset: {path} ---")
@@ -168,24 +180,40 @@ def main():
             os.mkdir(path)
             print(f"Created directory: {path}")
 
-        intervals = intervals_dict.get(path, [0.0] * 8) # Default to zero intervals if not specified
-        input_type = input_type_dict.get(path, 'sine') # Default to sine if not specified
-        params = trajectory_params.get(input_type, None) # Get specific params if applicable
+        intervals = intervals_dict.get(path, [0.0] * 8)  # Default to zero intervals if not specified
+        input_type = input_type_dict.get(path, 'sine')  # Default to sine if not specified
+        params = trajectory_params.get(input_type, None)  # Get specific params if applicable
 
         print(f"Parameters: N_traj={n_traj}, input_type='{input_type}', T_tot={T_tot_}, dt={dt_}, intervals={intervals}, params={params}")
 
-        X, U, t, t_coll = create_data(
+        if path == 'drone_training_set':
+            dynamics_fn = dynamics_dict['drone']
+            N_x = 9  # Drone has 9 states
+            N_u = 4  # Drone has 4 control inputs
+            U_scaler = [1,1,1,1]
+        else:
+            dynamics_fn = bluerov_dynamics
+            N_x = 8
+            N_u = 4
+            U_scaler = [0.1, 0.1, 5, 0.05]
+
+        X, U, t, t_coll = generate_data(
+            dynamics_fn=dynamics_fn,
             N_traj=n_traj,
             input_type=input_type,
-            params=params, # Pass trajectory specific parameters
             T_tot=T_tot_,
             dt=dt_,
             N_x=N_x,
             N_u=N_u,
             N_coll=N_coll,
             fixed_coll_points=[dt_],
-            intervals=intervals
+            intervals=intervals,
+            params=params  # Pass trajectory specific parameters
         )
+
+        # Scale the control inputs
+        for i in range(N_u):
+            U[:,:,i] *= U_scaler[i]
 
         # Save data
         torch.save(torch.from_numpy(t), os.path.join(path, 't.pt'))

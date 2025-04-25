@@ -33,3 +33,8 @@ tensorboard_csv_outputs
 __pycache__
 models/__pycache__
 memory-bank/
+
+# Drone specific ignores
+drone_data/
+models/drone_training_*
+results/drone_pinn_results/
