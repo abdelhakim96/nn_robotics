@@ -87,6 +87,7 @@ N_x = X_0.shape[2]
 N_u = U_0.shape[-1]
 N_seq = X_0.shape[1]
 
+N_out = 12 # Ensure N_out is 12 for plotting and rollout
 X_hat_single_step = X_hat_single_step.view(N_batch, N_seq, N_out)
 X_hat_single_step_np = X_hat_single_step.detach().cpu().numpy() # Keep tensor for loss, use numpy for plots
 X_0_np = X_0.cpu().numpy() # Use numpy for plots
@@ -127,7 +128,7 @@ print(f"Overall Single-Step MSE: {single_step_mse:.6f}")
 
 # --- Loss Calculation ---
 print("Calculating losses...")
-rollout_loss = (100*torch.log10(rollout_loss_fn(model, X_0.to(device), U_0.to(device), time_0.to(device), 10, device, t_coll_0.to(device), False, 0.0)[0])).round()/100
+rollout_loss = (100*torch.log10(rollout_loss_fn(model, X_0.to(device), U_0.to(device), time_0.to(device), 10, device, t_coll_0.to(device), False, N_out, 0.0)[0])).round()/100
 print(f"Rollout Loss (10 steps, dB): {rollout_loss.item():.2f}")
 
 # Slice X_0 and U_0 to match t_coll_0's sequence length (99) for physics loss calculation
@@ -267,9 +268,9 @@ axs[1, 0].legend()
 axs[1, 0].grid(True)
 
 # MSE Disturbances (Fx, Fy, Fz) - New indices 12, 13, 14
-axs[1, 1].plot(t_pred, (X_0_np[plot_idx, 1:, 12] - X_hat_single_step_np[plot_idx, :-1, 12])**2, label="Fx dist")
-axs[1, 1].plot(t_pred, (X_0_np[plot_idx, 1:, 13] - X_hat_single_step_np[plot_idx, :-1, 13])**2, label="Fy dist")
-axs[1, 1].plot(t_pred, (X_0_np[plot_idx, 1:, 14] - X_hat_single_step_np[plot_idx, :-1, 14])**2, label="Fz dist")
+# axs[1, 1].plot(t_pred, (X_0_np[plot_idx, 1:, 12] - X_hat_single_step_np[plot_idx, :-1, 12])**2, label="Fx dist")
+# axs[1, 1].plot(t_pred, (X_0_np[plot_idx, 1:, 13] - X_hat_single_step_np[plot_idx, :-1, 13])**2, label="Fy dist")
+# axs[1, 1].plot(t_pred, (X_0_np[plot_idx, 1:, 14] - X_hat_single_step_np[plot_idx, :-1, 14])**2, label="Fz dist")
 axs[1, 1].set_title("MSE Disturbances")
 axs[1, 1].set_xlabel("Time (s)")
 axs[1, 1].set_ylabel("MSE $[N^2?]$") # Units might need checking
@@ -286,7 +287,8 @@ print("Performing rollout prediction...")
 # Use the same initial batch X_0, U_0, t_coll_0, time_0 or get a new one if desired
 # X_0, U_0, t_coll_0, time_0 = next(iter(dev_dataloader)) # Optional: get new batch
 
-X_0_preds_rollout = torch.zeros_like(X_0).to(device)
+N_out = 12 # Ensure N_out is 12 for rollout
+X_0_preds_rollout = torch.zeros((X_0.shape[0], X_0.shape[1], 12)).to(device)
 X_current_rollout = X_0[:, 0, :].unsqueeze(1).to(device) # Start with initial state
 
 rollout_steps = N_seq - 1 # Rollout for the length of the sequence
@@ -304,8 +306,8 @@ for i in range(rollout_steps):
     Z_hat_step = model(Z_step)
 
     # Convert output and store prediction
-    X_next_rollout = convert_output_data(Z_hat_step, N_batch_step, N_seq_step, N_x_step)
-    X_0_preds_rollout[:, i+1, :] = X_next_rollout.squeeze(1) # Store prediction for the *next* state
+    X_next_rollout = convert_output_data(Z_hat_step, N_batch_step, N_seq_step, N_out)
+    X_0_preds_rollout[:, i+1, :] = X_next_rollout.squeeze(1)[:, :12] # Store prediction for the *next* state
     
     # Update current state for next iteration
     X_current_rollout = X_next_rollout
